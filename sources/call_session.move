@@ -1,10 +1,18 @@
 module rtc::call_session {
     use std::string;
     use sui::event;
-    use rtc::profile;
 
     // ============ EVENTS ============
     public struct CallInitiated has copy, drop {
+        session_id: ID,
+        caller: address,
+        callee: address,
+        caller_profile: ID,
+        callee_profile: ID,
+        timestamp: u64,
+    }
+
+    public struct CallSessionCreated has copy, drop {
         session_id: ID,
         caller: address,
         callee: address,
@@ -39,8 +47,8 @@ module rtc::call_session {
         id: UID,
         caller: address,
         callee: address,
-        caller_profile: ID,  // Reference to caller's Profile NFT
-        callee_profile: ID,  // Reference to callee's Profile NFT
+        caller_profile: ID,  // Reference to caller's Profile
+        callee_profile: ID,  // Reference to callee's Profile
         
         // WebRTC Signaling Data
         offer_sdp: string::String,    // Caller's SDP offer
@@ -72,22 +80,22 @@ module rtc::call_session {
 
     /// Create a new call session (initiate a call)
     public fun create_call_session(
-        caller_profile: &profile::Profile,
+        caller: address,
         callee: address,
+        caller_profile_id: ID,
         callee_profile_id: ID,
-        offer_sdp: string::String,
+        offer_sdp: vector<u8>,
         ctx: &mut TxContext
     ): CallSession {
-        let caller = profile::get_owner(caller_profile);
         let timestamp = tx_context::epoch(ctx);
         
         let session = CallSession {
             id: object::new(ctx),
             caller,
             callee,
-            caller_profile: object::id(caller_profile),
+            caller_profile: caller_profile_id,
             callee_profile: callee_profile_id,
-            offer_sdp,
+            offer_sdp: string::utf8(offer_sdp),
             answer_sdp: string::utf8(b""),
             status: STATUS_INITIATED,
             initiated_at: timestamp,
@@ -102,6 +110,8 @@ module rtc::call_session {
             session_id: object::id(&session),
             caller,
             callee,
+            caller_profile: caller_profile_id,
+            callee_profile: callee_profile_id,
             timestamp,
         });
 
@@ -111,14 +121,14 @@ module rtc::call_session {
     /// Answer a call - provide SDP answer
     public fun answer_call(
         session: &mut CallSession,
-        answer_sdp: string::String,
+        answer_sdp: vector<u8>,
         ctx: &TxContext
     ) {
         let sender = tx_context::sender(ctx);
         assert!(sender == session.callee, E_NOT_CALLEE);
         assert!(session.status == STATUS_INITIATED, E_INVALID_STATUS);
         
-        session.answer_sdp = answer_sdp;
+        session.answer_sdp = string::utf8(answer_sdp);
         session.status = STATUS_ACTIVE;
         session.answered_at = tx_context::epoch(ctx);
 
@@ -179,11 +189,11 @@ module rtc::call_session {
     /// Update ICE candidate (for NAT traversal)
     public fun update_caller_ice_candidate(
         session: &mut CallSession,
-        ice_candidate: string::String,
+        ice_candidate: vector<u8>,
         ctx: &TxContext
     ) {
         assert!(tx_context::sender(ctx) == session.caller, E_NOT_CALLER);
-        session.caller_ice_candidate = ice_candidate;
+        session.caller_ice_candidate = string::utf8(ice_candidate);
         
         event::emit(OfferUpdated {
             session_id: object::id(session),
@@ -193,11 +203,11 @@ module rtc::call_session {
 
     public fun update_callee_ice_candidate(
         session: &mut CallSession,
-        ice_candidate: string::String,
+        ice_candidate: vector<u8>,
         ctx: &TxContext
     ) {
         assert!(tx_context::sender(ctx) == session.callee, E_NOT_CALLEE);
-        session.callee_ice_candidate = ice_candidate;
+        session.callee_ice_candidate = string::utf8(ice_candidate);
         
         event::emit(AnswerUpdated {
             session_id: object::id(session),
@@ -207,22 +217,37 @@ module rtc::call_session {
 
     // ============ ENTRY FUNCTIONS ============
 
-    /// Entry point to initiate a call
+    /// Entry point to initiate a call - UPDATED to accept IDs instead of profile references
     entry fun initiate_call_entry(
-        caller_profile: &profile::Profile,
+        caller_profile_id: ID,
         callee: address,
         callee_profile_id: ID,
         offer_sdp: vector<u8>,
         ctx: &mut TxContext
     ) {
+        let caller = tx_context::sender(ctx);
+        
         let session = create_call_session(
-            caller_profile,
+            caller,
             callee,
+            caller_profile_id,
             callee_profile_id,
-            string::utf8(offer_sdp),
+            offer_sdp,
             ctx
         );
-        transfer::transfer(session, tx_context::sender(ctx));
+        
+        let session_id = object::id(&session);
+        
+        // Transfer to CALLER (transaction sender) so it appears in transaction results
+        transfer::transfer(session, caller);
+        
+        // Emit additional event with session details for frontend
+        event::emit(CallSessionCreated {
+            session_id: session_id,
+            caller: caller,
+            callee: callee,
+            timestamp: tx_context::epoch(ctx),
+        });
     }
 
     /// Entry point to answer a call
@@ -231,17 +256,7 @@ module rtc::call_session {
         answer_sdp: vector<u8>,
         ctx: &TxContext
     ) {
-        answer_call(session, string::utf8(answer_sdp), ctx);
-    }
-
-    public entry fun answer_call_entry(
-        call_session: &mut CallSession,
-        answer: vector<u8>,
-        ctx: &mut TxContext
-    ) {
-        // Store the answer in the call session
-        call_session.answer = answer;
-        call_session.status = STATUS_ANSWERED;
+        answer_call(session, answer_sdp, ctx);
     }
 
     /// Entry point to end a call
@@ -258,6 +273,24 @@ module rtc::call_session {
         ctx: &TxContext
     ) {
         decline_call(session, ctx);
+    }
+
+    /// Entry point to update caller ICE candidate
+    entry fun update_caller_ice_candidate_entry(
+        session: &mut CallSession,
+        ice_candidate: vector<u8>,
+        ctx: &TxContext
+    ) {
+        update_caller_ice_candidate(session, ice_candidate, ctx);
+    }
+
+    /// Entry point to update callee ICE candidate
+    entry fun update_callee_ice_candidate_entry(
+        session: &mut CallSession,
+        ice_candidate: vector<u8>,
+        ctx: &TxContext
+    ) {
+        update_callee_ice_candidate(session, ice_candidate, ctx);
     }
 
     // ============ GETTER FUNCTIONS ============
