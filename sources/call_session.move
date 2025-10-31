@@ -9,7 +9,7 @@ module rtc::call_session {
         callee: address,
         caller_profile: ID,
         callee_profile: ID,
-        timestamp: u64,
+
     }
 
     public struct CallSessionCreated has copy, drop {
